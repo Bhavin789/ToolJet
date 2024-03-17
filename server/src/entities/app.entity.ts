@@ -13,11 +13,10 @@ import {
   JoinTable,
   AfterInsert,
   getRepository,
+  getManager,
 } from 'typeorm';
 import { User } from './user.entity';
 import { AppVersion } from './app_version.entity';
-import { DataQuery } from './data_query.entity';
-import { DataSource } from './data_source.entity';
 import { GroupPermission } from './group_permission.entity';
 import { AppGroupPermission } from './app_group_permission.entity';
 
@@ -34,6 +33,12 @@ export class App extends BaseEntity {
 
   @Column({ name: 'is_public', default: true })
   isPublic: boolean;
+
+  @Column({ name: 'is_maintenance_on', default: false })
+  isMaintenanceOn: boolean;
+
+  @Column({ name: 'icon' })
+  icon: string;
 
   @Column({ name: 'organization_id' })
   organizationId: string;
@@ -55,20 +60,9 @@ export class App extends BaseEntity {
   user: User;
 
   @OneToMany(() => AppVersion, (appVersion) => appVersion.app, {
-    eager: true,
     onDelete: 'CASCADE',
   })
   appVersions: AppVersion[];
-
-  @OneToMany(() => DataQuery, (dataQuery) => dataQuery.app, {
-    onDelete: 'CASCADE',
-  })
-  dataQueries: DataQuery[];
-
-  @OneToMany(() => DataSource, (dataSource) => dataSource.app, {
-    onDelete: 'CASCADE',
-  })
-  dataSources: DataSource[];
 
   @ManyToMany(() => GroupPermission)
   @JoinTable({
@@ -97,12 +91,9 @@ export class App extends BaseEntity {
 
   @AfterLoad()
   async afterLoad(): Promise<void> {
-    if (this.currentVersionId) {
-      this.editingVersion = this.appVersions
-        ? this.appVersions.find((version) => version.id === this.currentVersionId)
-        : {};
-    } else {
-      this.editingVersion = this.appVersions ? this.appVersions[0] : {};
-    }
+    this.editingVersion = await getManager().findOne(AppVersion, {
+      where: { appId: this.id },
+      order: { updatedAt: 'DESC' },
+    });
   }
 }

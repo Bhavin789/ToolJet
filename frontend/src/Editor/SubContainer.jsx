@@ -1,17 +1,26 @@
-import React, { useCallback, useState, useEffect } from 'react';
+/* eslint-disable import/no-named-as-default */
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { useDrop, useDragLayer } from 'react-dnd';
 import { ItemTypes } from './ItemTypes';
 import { DraggableBox } from './DraggableBox';
-import { snapToGrid as doSnapToGrid } from './snapToGrid';
 import update from 'immutability-helper';
-import { componentTypes } from './Components/components';
-import { computeComponentName } from '@/_helpers/utils';
+const produce = require('immer').default;
+import _ from 'lodash';
+import { componentTypes } from './WidgetManager/components';
+import { addNewWidgetToTheEditor } from '@/_helpers/appUtils';
+import { resolveReferences } from '@/_helpers/utils';
+import { toast } from 'react-hot-toast';
+import { restrictedWidgetsObj } from '@/Editor/WidgetManager/restrictedWidgetsConfig';
+import { useCurrentState } from '@/_stores/currentStateStore';
+import { useAppVersionStore } from '@/_stores/appVersionStore';
+import { shallow } from 'zustand/shallow';
+import { useMounted } from '@/_hooks/use-mount';
+import { useEditorStore } from '@/_stores/editorStore';
+// eslint-disable-next-line import/no-unresolved
+import { diff } from 'deep-object-diff';
+import { isPDFSupported } from '@/_stores/utils';
 
-function uuidv4() {
-  return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, (c) =>
-    (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)
-  );
-}
+const NO_OF_GRIDS = 43;
 
 export const SubContainer = ({
   mode,
@@ -20,47 +29,193 @@ export const SubContainer = ({
   onEvent,
   appDefinition,
   appDefinitionChanged,
-  currentState,
   onComponentOptionChanged,
   onComponentOptionsChanged,
   appLoading,
   zoomLevel,
   parent,
   parentRef,
-  configHandleClicked,
+  setSelectedComponent,
   deviceWindowWidth,
   selectedComponent,
   currentLayout,
   removeComponent,
   darkMode,
   containerCanvasWidth,
+  readOnly,
+  customResolvables,
+  parentComponent,
+  onComponentHover,
+  hoveredComponent,
+  sideBarDebugger,
+  onOptionChange,
+  exposedVariables,
+  addDefaultChildren = false,
+  height = '100%',
+  currentPageId,
+  childComponents = null,
+  listmode = null,
+  columns = 1,
 }) => {
-  const [_currentParentRef, setParentRef] = useState(parentRef);
+  //Todo add custom resolve vars for other widgets too
+  const mounted = useMounted();
+  const widgetResolvables = Object.freeze({
+    Listview: 'listItem',
+  });
 
+  const customResolverVariable = widgetResolvables[parentComponent?.component];
+  const currentState = useCurrentState();
+  const { enableReleasedVersionPopupState, isVersionReleased } = useAppVersionStore(
+    (state) => ({
+      enableReleasedVersionPopupState: state.actions.enableReleasedVersionPopupState,
+      isVersionReleased: state.isVersionReleased,
+    }),
+    shallow
+  );
+
+  const gridWidth = getContainerCanvasWidth() / NO_OF_GRIDS;
+
+  const [_containerCanvasWidth, setContainerCanvasWidth] = useState(0);
   useEffect(() => {
-    setParentRef(parentRef);
-  }, [parentRef]);
+    if (parentRef.current) {
+      const canvasWidth = getContainerCanvasWidth();
+      setContainerCanvasWidth(canvasWidth);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parentRef, getContainerCanvasWidth(), listmode]);
 
   zoomLevel = zoomLevel || 1;
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const allComponents = appDefinition ? appDefinition.components : {};
+  const allComponents = appDefinition ? appDefinition.pages[currentPageId].components : {};
+  const isParentModal =
+    (allComponents[parent]?.component?.component === 'Modal' ||
+      allComponents[parent]?.component?.component === 'Form' ||
+      allComponents[parent]?.component?.component === 'Container') ??
+    false;
 
-  let childComponents = [];
+  const getChildWidgets = (components) => {
+    let childWidgets = {};
+    Object.keys(components).forEach((key) => {
+      const componentParent = components[key].component.parent;
+      if (componentParent === parent) {
+        childWidgets[key] = { ...components[key], component: { ...components[key]['component'], parent } };
+      }
+    });
 
-  Object.keys(allComponents).forEach((key) => {
-    if (allComponents[key].parent === parent) {
-      childComponents[key] = allComponents[key];
-    }
-  });
+    return childWidgets;
+  };
 
   const [boxes, setBoxes] = useState(allComponents);
+  const [childWidgets, setChildWidgets] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
+  // const [subContainerHeight, setSubContainerHeight] = useState('100%'); //used to determine the height of the sub container for modal
+  const subContainerHeightRef = useRef(height ?? '100%');
 
   useEffect(() => {
     setBoxes(allComponents);
-  }, [allComponents]);
+    setChildWidgets(() => getChildWidgets(allComponents));
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allComponents, parent]);
+
+  useEffect(() => {
+    if (mounted) {
+      //find children with parent prop
+      const children = Object.keys(allComponents).filter((key) => {
+        if (key === parent) return false;
+        return allComponents[key].parent === parent;
+      });
+
+      if (children.length === 0 && addDefaultChildren === true) {
+        const defaultChildren = _.cloneDeep(parentComponent)['defaultChildren'];
+        const childrenBoxes = {};
+        const parentId =
+          parentComponent.component !== 'Tabs'
+            ? parentRef.current.id
+            : parentRef.current.id?.substring(0, parentRef.current.id.lastIndexOf('-'));
+
+        const _allComponents = JSON.parse(JSON.stringify(allComponents));
+
+        defaultChildren.forEach((child) => {
+          const { componentName, layout, incrementWidth, properties, accessorKey, tab, defaultValue, styles } = child;
+
+          const componentMeta = _.cloneDeep(componentTypes.find((component) => component.component === componentName));
+          const componentData = JSON.parse(JSON.stringify(componentMeta));
+
+          const width = layout.width ? layout.width : (componentMeta.defaultSize.width * 100) / NO_OF_GRIDS;
+          const height = layout.height ? layout.height : componentMeta.defaultSize.height;
+          const newComponentDefinition = {
+            ...componentData.definition.properties,
+          };
+
+          if (_.isArray(properties) && properties.length > 0) {
+            properties.forEach((prop) => {
+              const accessor = customResolverVariable
+                ? `{{${customResolverVariable}.${accessorKey}}}`
+                : defaultValue[prop] || '';
+
+              _.set(newComponentDefinition, prop, {
+                value: accessor,
+              });
+            });
+            _.set(componentData, 'definition.properties', newComponentDefinition);
+          }
+
+          if (_.isArray(styles) && styles.length > 0) {
+            styles.forEach((prop) => {
+              const accessor = customResolverVariable
+                ? `{{${customResolverVariable}.${accessorKey}}}`
+                : defaultValue[prop] || '';
+
+              _.set(newComponentDefinition, prop, {
+                value: accessor,
+              });
+            });
+            _.set(componentData, 'definition.styles', newComponentDefinition);
+          }
+
+          const newComponent = addNewWidgetToTheEditor(
+            componentData,
+            {},
+            { ..._allComponents, ...childrenBoxes },
+            {},
+            currentLayout,
+            snapToGrid,
+            zoomLevel,
+            true,
+            true
+          );
+
+          _.set(childrenBoxes, newComponent.id, {
+            component: {
+              ...newComponent.component,
+              parent: parentComponent.component === 'Tabs' ? parentId + '-' + tab : parentId,
+            },
+
+            layouts: {
+              [currentLayout]: {
+                ...layout,
+                width: incrementWidth ? width * incrementWidth : width,
+                height: height,
+              },
+            },
+          });
+        });
+
+        _allComponents[parentId] = {
+          ...allComponents[parentId],
+          withDefaultChildren: false,
+        };
+        setBoxes({
+          ..._allComponents,
+          ...childrenBoxes,
+        });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted]);
 
   const moveBox = useCallback(
     (id, left, top) => {
@@ -71,15 +226,39 @@ export const SubContainer = ({
           },
         })
       );
-      console.log('new boxes - 1', boxes);
     },
     [boxes]
   );
 
   useEffect(() => {
-    console.log('new boxes - 2', boxes);
     if (appDefinitionChanged) {
-      appDefinitionChanged({ ...appDefinition, components: boxes });
+      const newDefinition = {
+        ...appDefinition,
+        pages: {
+          ...appDefinition.pages,
+          [currentPageId]: {
+            ...appDefinition.pages[currentPageId],
+            components: boxes,
+          },
+        },
+      };
+
+      const oldComponents = appDefinition.pages[currentPageId]?.components ?? {};
+      const newComponents = boxes;
+
+      const componendAdded = Object.keys(newComponents).length > Object.keys(oldComponents).length;
+
+      const opts = { containerChanges: true };
+
+      if (componendAdded) {
+        opts.componentAdded = true;
+      }
+
+      const shouldUpdate = !_.isEmpty(diff(appDefinition, newDefinition));
+
+      if (shouldUpdate) {
+        appDefinitionChanged(newDefinition, opts);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boxes]);
@@ -91,9 +270,10 @@ export const SubContainer = ({
         if (parentRef.current) {
           const currentOffset = monitor.getSourceClientOffset();
           if (currentOffset) {
-            const canvasBoundingRect = parentRef.current
-              .getElementsByClassName('real-canvas')[0]
-              .getBoundingClientRect();
+            const canvasBoundingRect = parentRef?.current
+              ?.getElementsByClassName('real-canvas')[0]
+              ?.getBoundingClientRect();
+            if (!canvasBoundingRect) return { draggingState: false };
             if (
               currentOffset.x > canvasBoundingRect.x &&
               currentOffset.x < canvasBoundingRect.x + canvasBoundingRect.width
@@ -116,6 +296,7 @@ export const SubContainer = ({
     }
   });
 
+  //!Todo: need to check: this never gets called as draggingState is always false
   useEffect(() => {
     setIsDragging(draggingState);
   }, [draggingState]);
@@ -124,105 +305,68 @@ export const SubContainer = ({
     return (x * 100) / canvasWidth;
   }
 
-  function convertXFromPercentage(x, canvasWidth) {
-    return (x * canvasWidth) / 100;
-  }
-
   const [, drop] = useDrop(
     () => ({
       accept: ItemTypes.BOX,
       drop(item, monitor) {
-        let componentData = {};
-        let componentMeta = {};
-        let id = item.id;
+        if (item.component.component === 'PDF' && !isPDFSupported()) {
+          toast.error(
+            'PDF is not supported in this version of browser. We recommend upgrading to the latest version for full support.'
+          );
+          return;
+        }
 
-        let left = 0;
-        let top = 0;
-
-        let layouts = item['layouts'];
-        const currentLayoutOptions = layouts ? layouts[item.currentLayout] : {};
-
+        const componentMeta = _.cloneDeep(
+          componentTypes.find((component) => component.component === item.component.component)
+        );
         const canvasBoundingRect = parentRef.current.getElementsByClassName('real-canvas')[0].getBoundingClientRect();
+        const parentComp =
+          parentComponent?.component === 'Kanban'
+            ? parent.includes('modal')
+              ? 'Kanban_popout'
+              : 'Kanban_card'
+            : parentComponent.component;
+        if (!restrictedWidgetsObj[parentComp].includes(componentMeta?.component)) {
+          const newComponent = addNewWidgetToTheEditor(
+            componentMeta,
+            monitor,
+            boxes,
+            canvasBoundingRect,
+            item.currentLayout,
+            snapToGrid,
+            zoomLevel,
+            true
+          );
 
-        // Component already exists and this is just a reposition event
-        if (id) {
-          const delta = monitor.getDifferenceFromInitialOffset();
-          componentData = item.component;
-          left = Math.round(convertXFromPercentage(currentLayoutOptions.left, canvasBoundingRect.width) + delta.x);
-          top = Math.round(currentLayoutOptions.top + delta.y);
-
-          if (snapToGrid) {
-            [left, top] = doSnapToGrid(canvasBoundingRect.width, left, top);
-          }
-
-          left = convertXToPercentage(left, canvasBoundingRect.width);
-
-          let newBoxes = {
+          setBoxes({
             ...boxes,
-            [id]: {
-              ...boxes[id],
-              parent: parent,
+            [newComponent.id]: {
+              component: {
+                ...newComponent.component,
+                parent: parentRef.current.id,
+              },
               layouts: {
-                ...boxes[id]['layouts'],
-                [item.currentLayout]: {
-                  ...boxes[id]['layouts'][item.currentLayout],
-                  top: top,
-                  left: left,
-                },
+                ...newComponent.layout,
               },
+              withDefaultChildren: newComponent.withDefaultChildren,
             },
-          };
+          });
 
-          setBoxes(newBoxes);
+          setSelectedComponent(newComponent.id, newComponent.component);
+
+          return undefined;
         } else {
-          //  This is a new component
-          componentMeta = componentTypes.find((component) => component.component === item.component.component);
-          console.log('adding new component');
-          componentData = JSON.parse(JSON.stringify(componentMeta));
-          componentData.name = computeComponentName(componentData.component, boxes);
-
-          const offsetFromTopOfWindow = canvasBoundingRect.top;
-          const offsetFromLeftOfWindow = canvasBoundingRect.left;
-          const currentOffset = monitor.getSourceClientOffset();
-
-          left = Math.round(currentOffset.x + currentOffset.x * (1 - zoomLevel) - offsetFromLeftOfWindow);
-          top = Math.round(currentOffset.y + currentOffset.y * (1 - zoomLevel) - offsetFromTopOfWindow);
-
-          id = uuidv4();
-        }
-
-        const subContainerWidth = canvasBoundingRect.width;
-        if (snapToGrid) {
-          [left, top] = doSnapToGrid(subContainerWidth, left, top);
-        }
-
-        if (item.currentLayout === 'mobile') {
-          componentData.definition.others.showOnDesktop.value = false;
-          componentData.definition.others.showOnMobile.value = true;
-        }
-
-        // convert the left offset to percentage
-        left = (left * 100) / subContainerWidth;
-
-        const width = (componentMeta.defaultSize.width * 100) / 43;
-
-        setBoxes({
-          ...boxes,
-          [id]: {
-            component: componentData,
-            parent: parentRef.current.id,
-            layouts: {
-              [item.currentLayout]: {
-                top: top,
-                left: left,
-                width: width,
-                height: componentMeta.defaultSize.height,
+          toast.error(
+            ` ${componentMeta?.component} is not compatible as a child component of ${parentComp
+              .replace(/_/g, ' ')
+              .toLowerCase()}`,
+            {
+              style: {
+                wordBreak: 'break-word',
               },
-            },
-          },
-        });
-
-        return undefined;
+            }
+          );
+        }
       },
     }),
     [moveBox]
@@ -230,8 +374,10 @@ export const SubContainer = ({
 
   function getContainerCanvasWidth() {
     if (containerCanvasWidth !== undefined) {
-      return containerCanvasWidth;
+      if (listmode == 'grid') return containerCanvasWidth / columns - 2;
+      else return containerCanvasWidth - 2;
     }
+
     let width = 0;
     if (parentRef.current) {
       const realCanvas = parentRef.current.getElementsByClassName('real-canvas')[0];
@@ -240,14 +386,15 @@ export const SubContainer = ({
         width = canvasBoundingRect.width;
       }
     }
-
     return width;
   }
 
   function onDragStop(e, componentId, direction, currentLayout) {
-    const id = componentId ? componentId : uuidv4();
+    if (isVersionReleased) {
+      enableReleasedVersionPopupState();
+      return;
+    }
 
-    // Get the width of the canvas
     const canvasWidth = getContainerCanvasWidth();
     const nodeBounds = direction.node.getBoundingClientRect();
 
@@ -255,34 +402,55 @@ export const SubContainer = ({
 
     // Computing the left offset
     const leftOffset = nodeBounds.x - canvasBounds.x;
-    const left = convertXToPercentage(leftOffset, canvasWidth);
+    const currentLeftOffset = boxes[componentId].layouts[currentLayout].left;
+    const leftDiff = currentLeftOffset - convertXToPercentage(leftOffset, canvasWidth);
 
-    // Computing the top offset
-    const top = nodeBounds.y - canvasBounds.y;
+    const topDiff = boxes[componentId].layouts[currentLayout].top - (nodeBounds.y - canvasBounds.y);
 
-    let newBoxes = {
-      ...boxes,
-      [id]: {
-        ...boxes[id],
-        layouts: {
-          ...boxes[id]['layouts'],
-          [currentLayout]: {
-            ...boxes[id]['layouts'][currentLayout],
-            top: top,
-            left: left,
-          },
-        },
-      },
-    };
+    let newBoxes = { ...boxes };
 
+    const subContainerHeight = canvasBounds.height - 30;
+    const selectedComponents = useEditorStore.getState().selectedComponents;
+
+    if (selectedComponents) {
+      for (const selectedComponent of selectedComponents) {
+        newBoxes = produce(newBoxes, (draft) => {
+          const topOffset = draft[selectedComponent.id].layouts[currentLayout].top;
+          const leftOffset = draft[selectedComponent.id].layouts[currentLayout].left;
+
+          draft[selectedComponent.id].layouts[currentLayout].top = topOffset - topDiff;
+          draft[selectedComponent.id].layouts[currentLayout].left = leftOffset - leftDiff;
+        });
+
+        const componentBottom =
+          newBoxes[selectedComponent.id].layouts[currentLayout].top +
+          newBoxes[selectedComponent.id].layouts[currentLayout].height;
+
+        if (isParentModal && subContainerHeight <= componentBottom) {
+          subContainerHeightRef.current = subContainerHeight + 100;
+        }
+      }
+    }
+
+    setChildWidgets(() => getChildWidgets(newBoxes));
     setBoxes(newBoxes);
   }
 
   function onResizeStop(id, e, direction, ref, d, position) {
-    const deltaWidth = d.width;
+    if (isVersionReleased) {
+      enableReleasedVersionPopupState();
+      return;
+    }
+
+    const deltaWidth = Math.round(d.width / gridWidth) * gridWidth; //rounding of width of element to nearest mulitple of gridWidth
     const deltaHeight = d.height;
 
+    if (deltaWidth === 0 && deltaHeight === 0) {
+      return;
+    }
+
     let { x, y } = position;
+    x = Math.round(x / gridWidth) * gridWidth;
 
     const defaultData = {
       top: 100,
@@ -293,13 +461,24 @@ export const SubContainer = ({
 
     let { left, top, width, height } = boxes[id]['layouts'][currentLayout] || defaultData;
 
-    const canvasBoundingRect = parentRef.current.getElementsByClassName('real-canvas')[0].getBoundingClientRect();
-    const subContainerWidth = canvasBoundingRect.width;
-
     top = y;
-    left = (x * 100) / subContainerWidth;
+    if (deltaWidth !== 0) {
+      // onResizeStop is triggered for a single click on the border, therefore this conditional logic
+      // should not be removed.
+      left = (x * 100) / _containerCanvasWidth;
+    }
 
-    width = width + (deltaWidth * 43) / subContainerWidth;
+    //round the width to nearest multiple of gridwidth before converting to %
+    let currentWidth = (_containerCanvasWidth * width) / NO_OF_GRIDS;
+
+    if (currentWidth > _containerCanvasWidth) {
+      currentWidth = _containerCanvasWidth;
+    }
+
+    let newWidth = currentWidth + deltaWidth;
+    newWidth = Math.round(newWidth / gridWidth) * gridWidth;
+    width = (newWidth * NO_OF_GRIDS) / _containerCanvasWidth;
+
     height = height + deltaHeight;
 
     let newBoxes = {
@@ -324,8 +503,8 @@ export const SubContainer = ({
 
   function paramUpdated(id, param, value) {
     if (Object.keys(value).length > 0) {
-      setBoxes(
-        update(boxes, {
+      setBoxes((boxes) => {
+        return update(boxes, {
           [id]: {
             $merge: {
               component: {
@@ -340,83 +519,156 @@ export const SubContainer = ({
               },
             },
           },
-        })
-      );
+        });
+      });
     }
   }
 
   const styles = {
     width: '100%',
-    height: '100%',
+    height: subContainerHeightRef.current,
     position: 'absolute',
-    backgroundSize: `${getContainerCanvasWidth() / 43}px 10px`,
+    backgroundSize: `${gridWidth}px 10px`,
   };
+
+  //check if parent is listview or form return false is so
+  const checkParent = (box) => {
+    let isListView = false,
+      isForm = false;
+    try {
+      isListView =
+        appDefinition.pages[currentPageId].components[box?.component?.parent]?.component?.component === 'Listview';
+      isForm = appDefinition.pages[currentPageId].components[box?.component?.parent]?.component?.component === 'Form';
+    } catch {
+      console.log('error');
+    }
+    if (!isListView && !isForm) {
+      return true;
+    } else {
+      return false;
+    }
+  };
+
+  function onComponentOptionChangedForSubcontainer(component, optionName, value, componentId = '') {
+    if (typeof value === 'function' && _.findKey(exposedVariables, optionName)) {
+      return Promise.resolve();
+    }
+    onOptionChange && onOptionChange({ component, optionName, value, componentId });
+    return onComponentOptionChanged(component, optionName, value);
+  }
+
+  function customRemoveComponent(component) {
+    removeComponent(component);
+  }
+
+  function checkParentVisibility() {
+    let elem = parentRef.current;
+    if (elem?.className === 'tab-content') {
+      elem = parentRef.current?.parentElement;
+    }
+    if (elem?.style?.display !== 'none') return true;
+    return false;
+  }
 
   return (
     <div
       ref={drop}
       style={styles}
       id={`canvas-${parent}`}
-      className={`real-canvas ${isDragging || isResizing ? ' show-grid' : ''}`}
+      className={`real-canvas ${(isDragging || isResizing) && !readOnly ? 'show-grid' : ''}`}
     >
-      {Object.keys(childComponents).map((key) => (
-        <DraggableBox
-          onComponentClick={onComponentClick}
-          onEvent={onEvent}
-          onComponentOptionChanged={onComponentOptionChanged}
-          onComponentOptionsChanged={onComponentOptionsChanged}
-          key={key}
-          currentState={currentState}
-          onResizeStop={onResizeStop}
-          onDragStop={onDragStop}
-          paramUpdated={paramUpdated}
-          id={key}
-          {...boxes[key]}
-          mode={mode}
-          resizingStatusChanged={(status) => setIsResizing(status)}
-          draggingStatusChanged={(status) => setIsDragging(status)}
-          inCanvas={true}
-          zoomLevel={zoomLevel}
-          configHandleClicked={configHandleClicked}
-          currentLayout={currentLayout}
-          selectedComponent={selectedComponent}
-          deviceWindowWidth={deviceWindowWidth}
-          isSelectedComponent={selectedComponent ? selectedComponent.id === key : false}
-          removeComponent={removeComponent}
-          canvasWidth={getContainerCanvasWidth()}
-          containerProps={{
-            mode,
-            snapToGrid,
-            onComponentClick,
-            onEvent,
-            appDefinition,
-            appDefinitionChanged,
-            currentState,
-            onComponentOptionChanged,
-            onComponentOptionsChanged,
-            appLoading,
-            zoomLevel,
-            configHandleClicked,
-            removeComponent,
-            currentLayout,
-            deviceWindowWidth,
-            selectedComponent,
-            darkMode,
-          }}
-        />
-      ))}
+      {checkParentVisibility() &&
+        Object.keys(childWidgets).map((key) => {
+          const addDefaultChildren = childWidgets[key]['withDefaultChildren'] || false;
+          const box = childWidgets[key];
 
-      {Object.keys(boxes).length === 0 && !appLoading && !isDragging && (
-        <div className="mx-auto mt-5 w-50 p-5 bg-light no-components-box">
-          <center className="text-muted">
-            Drag components from the right sidebar and drop here. Check out our{' '}
-            <a href="https://docs.tooljet.io/docs/tutorial/adding-widget" target="_blank" rel="noreferrer">
-              guide
-            </a>{' '}
-            on adding widgets.
-          </center>
-        </div>
-      )}
+          const canShowInCurrentLayout =
+            box.component.definition.others[currentLayout === 'mobile' ? 'showOnMobile' : 'showOnDesktop'].value;
+
+          if (box.component.parent && resolveReferences(canShowInCurrentLayout, currentState)) {
+            return (
+              <DraggableBox
+                onComponentClick={onComponentClick}
+                onEvent={onEvent}
+                onComponentOptionChanged={
+                  checkParent(box)
+                    ? onComponentOptionChangedForSubcontainer
+                    : (component, optionName, value, componentId = '') => {
+                        if (typeof value === 'function' && _.findKey(exposedVariables, optionName)) {
+                          return Promise.resolve();
+                        }
+                        onOptionChange && onOptionChange({ component, optionName, value, componentId });
+                      }
+                }
+                onComponentOptionsChanged={(component, variableSet, id) => {
+                  checkParent(box)
+                    ? onComponentOptionsChanged(component, variableSet)
+                    : variableSet.map((item) => {
+                        onOptionChange &&
+                          onOptionChange({
+                            component,
+                            optionName: item[0],
+                            value: item[1],
+                            componentId: id,
+                          });
+                      });
+                }}
+                key={key}
+                onResizeStop={onResizeStop}
+                onDragStop={onDragStop}
+                paramUpdated={paramUpdated}
+                id={key}
+                allComponents={allComponents}
+                {...childWidgets[key]}
+                mode={mode}
+                resizingStatusChanged={(status) => setIsResizing(status)}
+                draggingStatusChanged={(status) => setIsDragging(status)}
+                inCanvas={true}
+                zoomLevel={zoomLevel}
+                setSelectedComponent={setSelectedComponent}
+                selectedComponent={selectedComponent}
+                deviceWindowWidth={deviceWindowWidth}
+                removeComponent={customRemoveComponent}
+                canvasWidth={_containerCanvasWidth}
+                readOnly={readOnly}
+                darkMode={darkMode}
+                customResolvables={customResolvables}
+                onComponentHover={onComponentHover}
+                hoveredComponent={hoveredComponent}
+                parentId={parentComponent?.name}
+                parent={parent}
+                sideBarDebugger={sideBarDebugger}
+                exposedVariables={exposedVariables ?? {}}
+                childComponents={childComponents[key]}
+                containerProps={{
+                  mode,
+                  snapToGrid,
+                  onComponentClick,
+                  onEvent,
+                  appDefinition,
+                  appDefinitionChanged,
+                  currentState,
+                  onComponentOptionChanged,
+                  onComponentOptionsChanged,
+                  appLoading,
+                  zoomLevel,
+                  setSelectedComponent,
+                  removeComponent,
+                  currentLayout,
+                  deviceWindowWidth,
+                  darkMode,
+                  readOnly,
+                  onComponentHover,
+                  hoveredComponent,
+                  sideBarDebugger,
+                  addDefaultChildren,
+                  currentPageId,
+                  childComponents,
+                }}
+              />
+            );
+          }
+        })}
       {appLoading && (
         <div className="mx-auto mt-5 w-50 p-5">
           <center>

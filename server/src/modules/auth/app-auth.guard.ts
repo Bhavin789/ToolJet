@@ -1,4 +1,4 @@
-import { ExecutionContext, Injectable } from '@nestjs/common';
+import { ExecutionContext, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { AppsService } from 'src/services/apps.service';
 
@@ -11,14 +11,31 @@ export class AppAuthGuard extends AuthGuard('jwt') {
   async canActivate(context: ExecutionContext): Promise<any> {
     const request = context.switchToHttp().getRequest();
 
+    if (!request.params.slug) {
+      throw new NotFoundException('App not found. Invalid app id');
+    }
     // unauthenticated users should be able to to view public apps
-    if (request.route.path === '/api/apps/slugs/:slug') {
-      const app = await this.appsService.findBySlug(request.params.slug);
-      if (app.isPublic === true) {
-        return true;
-      }
+    const app = await this.appsService.findBySlug(request.params.slug);
+    if (!app) throw new NotFoundException('App not found. Invalid app id');
+
+    request.tj_app = app;
+    request.headers['tj-workspace-id'] = app.organizationId;
+
+    if (app.isPublic === true) {
+      return true;
     }
 
-    return super.canActivate(context);
+    // Throw a custom exception with workspace ID if the app is not public
+    try {
+      const authResult = await super.canActivate(context);
+      return authResult;
+    } catch (error) {
+      throw new UnauthorizedException(
+        JSON.stringify({
+          organizationId: app?.organizationId,
+          message: 'Authentication is required to access this app.',
+        })
+      );
+    }
   }
 }

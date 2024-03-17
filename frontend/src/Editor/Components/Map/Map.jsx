@@ -1,7 +1,9 @@
-import React, { useState, useCallback } from 'react';
-import { GoogleMap, LoadScript, Marker, Autocomplete } from '@react-google-maps/api';
+/* eslint-disable react-hooks/exhaustive-deps */
+import React, { useState, useCallback, useEffect } from 'react';
+import { GoogleMap, LoadScript, Marker, Autocomplete, Polygon } from '@react-google-maps/api';
 import { resolveReferences, resolveWidgetFieldValue } from '@/_helpers/utils';
 import { darkModeStyles } from './styles';
+import { useTranslation } from 'react-i18next';
 
 export const Map = function Map({
   id,
@@ -14,23 +16,21 @@ export const Map = function Map({
   onComponentOptionChanged,
   onComponentOptionsChanged,
   onEvent,
-  // canvasWidth,
+  styles,
+  setExposedVariable,
+  dataCy,
+  properties,
 }) {
   const center = component.definition.properties.initialLocation.value;
-  const defaultMarkerValue = component.definition.properties.defaultMarkers.value;
+  const { polygonPoints = [], defaultMarkers = [] } = properties;
 
-  let defaultMarkers = [];
-  try {
-    defaultMarkers = defaultMarkerValue;
-  } catch (err) {
-    console.log(err);
-  }
+  const { t } = useTranslation();
 
   const addNewMarkersProp = component.definition.properties.addNewMarkers;
-  const canAddNewMarkers = addNewMarkersProp ? addNewMarkersProp.value : false;
+  const canAddNewMarkers = addNewMarkersProp ? resolveReferences(addNewMarkersProp.value, currentState) : false;
 
   const canSearchProp = component.definition.properties.canSearch;
-  const canSearch = canSearchProp ? canSearchProp.value : false;
+  const canSearch = canSearchProp ? resolveReferences(canSearchProp.value, currentState) : false;
   const widgetVisibility = component.definition.styles?.visibility?.value ?? true;
   const disabledState = component.definition.styles?.disabledState?.value ?? false;
 
@@ -48,12 +48,16 @@ export const Map = function Map({
   const [gmap, setGmap] = useState(null);
   const [autoComplete, setAutoComplete] = useState(null);
   const [mapCenter, setMapCenter] = useState(resolveReferences(center, currentState));
-  const [markers, setMarkers] = useState(resolveReferences(defaultMarkers, currentState));
+  const [markers, setMarkers] = useState(defaultMarkers);
 
   const containerStyle = {
     width: '100%',
     height,
   };
+
+  useEffect(() => {
+    setMarkers(defaultMarkers);
+  }, [JSON.stringify(defaultMarkers)]);
 
   function handleMapClick(e) {
     if (!canAddNewMarkers) {
@@ -70,6 +74,11 @@ export const Map = function Map({
     onComponentOptionChanged(component, 'markers', newMarkers).then(() => onEvent('onCreateMarker', { component }));
   }
 
+  function addMapUrlToJson(centerJson) {
+    centerJson.googleMapUrl = `https://www.google.com/maps/@?api=1&map_action=map&center=${centerJson?.lat},${centerJson?.lng}`;
+    return centerJson;
+  }
+
   function handleBoundsChange() {
     const mapBounds = gmap.getBounds();
 
@@ -83,14 +92,22 @@ export const Map = function Map({
 
     onComponentOptionsChanged(component, [
       ['bounds', bounds],
-      ['center', newCenter],
+      ['center', addMapUrlToJson(newCenter)],
     ]).then(() => onEvent('onBoundsChange', { component }));
   }
+
+  useEffect(() => {
+    const resolvedCenter = resolveReferences(center, currentState);
+    setMapCenter(resolvedCenter);
+    onComponentOptionsChanged(component, [['center', addMapUrlToJson(resolvedCenter)]]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [center]);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const onLoad = useCallback(function onLoad(mapInstance) {
     setGmap(mapInstance);
-    onComponentOptionsChanged(component, [['center', mapInstance.center?.toJSON()]]);
+    const centerJson = mapInstance.center?.toJSON();
+    onComponentOptionsChanged(component, [['center', addMapUrlToJson(centerJson)]]);
   });
 
   function handleMarkerClick(index) {
@@ -109,15 +126,22 @@ export const Map = function Map({
     setAutoComplete(autocompleteInstance);
   }
 
+  useEffect(() => {
+    setExposedVariable('setLocation', async function (lat, lng) {
+      if (lat && lng) setMapCenter(resolveReferences({ lat, lng }, currentState));
+    });
+  }, [setMapCenter]);
+
   return (
     <div
       data-disabled={parsedDisabledState}
-      style={{ height, display: parsedWidgetVisibility ? '' : 'none' }}
+      style={{ height, display: parsedWidgetVisibility ? '' : 'none', boxShadow: styles.boxShadow }}
       onClick={(event) => {
         event.stopPropagation();
         onComponentClick(id, component, event);
       }}
       className="map-widget"
+      data-cy={dataCy}
     >
       <div
         className="map-center"
@@ -126,7 +150,7 @@ export const Map = function Map({
           top: height * 0.5 - 50,
         }}
       >
-        <img className="mx-2" src="/assets/images/icons/marker.svg" width="24" height="64" />
+        <img className="mx-2" src="assets/images/icons/marker.svg" width="24" height="64" />
       </div>
       <LoadScript googleMapsApiKey={window.public_config.GOOGLE_MAPS_API_KEY} libraries={['places']}>
         <GoogleMap
@@ -145,7 +169,11 @@ export const Map = function Map({
         >
           {canSearch && (
             <Autocomplete onPlaceChanged={onPlaceChanged} onLoad={onAutocompleteLoad}>
-              <input type="text" placeholder="Search" className="place-search-input" />
+              <input
+                type="text"
+                placeholder={t('globals.search', 'Search')}
+                className={`place-search-input ${darkMode && 'text-light bg-dark dark-theme-placeholder'}`}
+              />
             </Autocomplete>
           )}
           {Array.isArray(markers) && (
@@ -154,6 +182,21 @@ export const Map = function Map({
                 <Marker key={index} position={marker} label={marker.label} onClick={() => handleMarkerClick(index)} />
               ))}
             </>
+          )}
+          {polygonPoints.length > 1 && (
+            <Polygon
+              path={polygonPoints}
+              onClick={() => {
+                onEvent('onPolygonClick', { component });
+              }}
+              options={{
+                strokeColor: '#4d72fa',
+                strokeOpacity: 1,
+                strokeWeight: 2,
+                fillColor: '#4d72fa',
+                fillOpacity: 0.5,
+              }}
+            />
           )}
         </GoogleMap>
       </LoadScript>

@@ -1,56 +1,97 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, forwardRef } from 'react';
 import PropTypes from 'prop-types';
+import cx from 'classnames';
+import useDebounce from '@/_hooks/useDebounce';
+import { useMounted } from '@/_hooks/use-mount';
+import SolidIcon from '@/_ui/Icon/SolidIcons';
 
-export function SearchBox({ onSubmit, initialValue = '' }) {
-  const [searchText, setSearchText] = useState(initialValue);
+export const SearchBox = forwardRef(
+  (
+    {
+      width = '200px',
+      onSubmit,
+      className,
+      debounceDelay = 300,
+      darkMode = false,
+      placeholder = 'Search',
+      customClass = '',
+      dataCy = '',
+      callBack,
+      onClearCallback,
+      autoFocus = false,
+      showClearButton,
+      initialValue = '',
+    },
+    ref
+  ) => {
+    const [searchText, setSearchText] = useState('');
+    const debouncedSearchTerm = useDebounce(searchText, debounceDelay);
+    const [isFocused, setFocussed] = useState(false);
 
-  useEffect(() => {
-    setSearchText(initialValue);
-  }, [initialValue]);
+    const handleChange = (e) => {
+      setSearchText(e.target.value);
+      callBack?.(e);
+    };
 
-  const handleChange = (e) => {
-    setSearchText(e.target.value);
-  };
+    const clearSearchText = () => {
+      setSearchText('');
+      onClearCallback?.();
+    };
 
-  const trackEnterKey = (e) => {
-    if (e.key === 'Enter') {
-      onSubmit(searchText);
-    }
-  };
+    const mounted = useMounted();
 
-  return (
-    <div className="search-box-wrapper">
-      <div className="input-icon mb-3">
-        <span className="input-icon-addon">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className="icon"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            strokeWidth="2"
-            stroke="currentColor"
-            fill="none"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path stroke="none" d="M0 0h24v24H0z" fill="none" />
-            <circle cx="10" cy="10" r="7" />
-            <line x1="21" y1="21" x2="15" y2="15" />
-          </svg>
-        </span>
-        <input
-          type="text"
-          value={searchText}
-          onKeyDown={trackEnterKey}
-          onChange={handleChange}
-          className="form-control"
-          placeholder="Search"
-        />
+    useEffect(() => {
+      if (mounted) {
+        onSubmit?.(debouncedSearchTerm);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [debouncedSearchTerm, onSubmit]);
+
+    useEffect(() => {
+      initialValue !== undefined && setSearchText(initialValue);
+    }, [initialValue]);
+
+    return (
+      <div className={`search-box-wrapper ${customClass}`}>
+        <div className="input-icon">
+          {!isFocused && (
+            <span className="input-icon-addon">
+              <SolidIcon name="search" width="14" />
+            </span>
+          )}
+          <input
+            style={{ width }}
+            type="text"
+            value={searchText}
+            onChange={handleChange}
+            className={cx('form-control', {
+              'dark-theme-placeholder': darkMode,
+              [className]: !!className,
+            })}
+            placeholder={placeholder}
+            onFocus={() => setFocussed(true)}
+            onBlur={() => setFocussed(false)}
+            data-cy={`${dataCy}-search-bar`}
+            autoFocus={autoFocus}
+            ref={ref}
+          />
+          {searchText.length > 0 ? (
+            <span className="input-icon-addon end" onMouseDown={clearSearchText}>
+              <div className="d-flex tj-common-search-input-clear-icon" title="clear">
+                <SolidIcon name="remove" />
+              </div>
+            </span>
+          ) : (
+            ''
+          )}
+        </div>
       </div>
-    </div>
-  );
-}
-SearchBox.PropTypes = {
-  onabort: PropTypes.func.isRequired,
+    );
+  }
+);
+
+SearchBox.propTypes = {
+  onSubmit: PropTypes.func.isRequired,
+  debounceDelay: PropTypes.number,
+  width: PropTypes.string,
 };
